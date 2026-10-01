@@ -199,6 +199,7 @@ function buildDoc(){
 }
 function changed(msg){
   dirty=true;if(msg)toast(msg);
+  if(FB&&FB.state==='ready'){clearTimeout(fbTimer);statusMsg='Cambios pendientes…';renderStatus();fbTimer=setTimeout(cloudSave,500);return;}
   if(LOCAL){if(localOK)saveLocal();else{statusMsg='Cambios sin guardar (el navegador bloquea el guardado)';renderStatus();}return;}
   if(canSave===false){statusMsg='Cambios sin guardar (vista de solo lectura)';renderStatus();return;}
   statusMsg='Cambios pendientes…';renderStatus();
@@ -216,7 +217,64 @@ function save(){
     renderStatus();});
 }
 window.addEventListener('beforeunload',function(e){if(dirty&&canSave){e.preventDefault();e.returnValue='';}});
-function renderStatus(){var el=document.getElementById('status');if(!el)return;el.textContent=statusMsg||(canSave?(LOCAL?'Guardado en este dispositivo':'Todo guardado'):'');el.className='status'+(/sin guardar|Solo lectura|No se pudo/.test(statusMsg)?' warn':'');}
+
+/* ---------- Firebase (solo fuera de Claude) ---------- */
+var FB_CONFIG={apiKey:"AIzaSyDFAmRwXIWtnsDl4v0O351F47OhSCe7pGQ",authDomain:"hstl-f98cd.firebaseapp.com",projectId:"hstl-f98cd",storageBucket:"hstl-f98cd.firebasestorage.app",messagingSenderId:"253916290752",appId:"1:253916290752:web:39fc01c92ffe301822d725"};
+var FB_VER='10.14.1';
+var FB=LOCAL?{state:'loading',user:null,err:''}:null, fbAuth=null, fbRef=null, fbUnsub=null, fbTimer=null;
+function loadScript(src){return new Promise(function(ok,ko){var s=document.createElement('script');s.src=src;s.onload=ok;s.onerror=ko;document.head.appendChild(s);});}
+function initFirebase(){
+  var base='https://www.gstatic.com/firebasejs/'+FB_VER+'/';
+  loadScript(base+'firebase-app-compat.js').then(function(){return Promise.all([loadScript(base+'firebase-auth-compat.js'),loadScript(base+'firebase-firestore-compat.js')]);})
+  .then(function(){
+    firebase.initializeApp(FB_CONFIG);
+    var db=firebase.firestore();
+    try{db.enablePersistence({synchronizeTabs:true}).catch(function(){});}catch(e){}
+    fbRef=db.collection('hstl').doc('datos');
+    fbAuth=firebase.auth();
+    fbAuth.onAuthStateChanged(function(u){
+      FB.user=u;if(fbUnsub){fbUnsub();fbUnsub=null;}
+      if(!u){FB.state='login';render();return;}
+      FB.state='syncing';FB.err='';render();
+      fbUnsub=fbRef.onSnapshot({includeMetadataChanges:false},function(snap){
+        if(snap.metadata.hasPendingWrites)return;
+        if(!snap.exists){if(snap.metadata.fromCache)return;FB.state='ready';firstUpload();return;}
+        var o;try{o=JSON.parse(snap.data().data);}catch(e){o=null;}
+        if(!o||!Array.isArray(o.sales)){FB.state='ready';render();return;}
+        if(ui.modal&&ui.modal.t==='sale'&&document.getElementById('sf'))readDraft();
+        DB=o;S=o.sales;FB.state='ready';
+        statusMsg=snap.metadata.fromCache?'Sin conexión: datos del equipo':'Sincronizado';
+        cacheLocal();render();
+      },function(err){FB.state='denied';FB.err=err&&err.code||'error';render();});
+    });
+  }).catch(function(){FB.state='fallback';FB.err='No se pudo cargar Firebase (¿sin internet?). Trabajando solo en este equipo.';render();});
+}
+function cacheLocal(){if(!localOK)return;try{localStorage.setItem(LKEY,JSON.stringify({v:1,seq:DB.seq,saved:DB.saved||0,sales:S}));}catch(e){}}
+function cloudSave(){
+  DB.sales=S;DB.saved=Date.now();cacheLocal();
+  statusMsg='Guardando…';renderStatus();
+  fbRef.set({data:JSON.stringify({v:1,seq:DB.seq,saved:DB.saved,sales:S}),saved:DB.saved,por:(FB.user&&FB.user.email)||''})
+  .then(function(){dirty=false;statusMsg='Guardado en la nube';renderStatus();})
+  .catch(function(e){statusMsg='No se pudo guardar ('+(e&&e.code||'error')+')';renderStatus();});
+}
+function firstUpload(){render();toast('Subiendo tus '+S.length+' ventas a Firebase…');cloudSave();}
+function signIn(){
+  var prov=new firebase.auth.GoogleAuthProvider();prov.setCustomParameters({prompt:'select_account'});
+  FB.err='';fbAuth.signInWithPopup(prov).catch(function(e){var c=e&&e.code||'';
+    if(c==='auth/popup-closed-by-user'||c==='auth/cancelled-popup-request')return;
+    FB.err=c==='auth/unauthorized-domain'?'Falta autorizar '+location.hostname+' en Firebase → Authentication → Configuración → Dominios autorizados.':c==='auth/popup-blocked'?'El navegador bloqueó la ventana de Google. Permite ventanas emergentes para esta página y vuelve a intentar.':c==='auth/operation-not-allowed'?'El inicio de sesión con Google no está activado en Firebase → Authentication.':'No se pudo entrar ('+c+').';
+    render();});
+}
+function signOut(){if(fbAuth)fbAuth.signOut();ui.modal=null;}
+function gate(){
+  var body='';
+  if(FB.state==='loading'||FB.state==='syncing')body='<p class="muted">'+(FB.state==='loading'?'Conectando…':'Cargando tus datos…')+'</p>';
+  else if(FB.state==='login')body='<p>Entra con tu cuenta de Google para ver y guardar tus ventas en todos tus equipos.</p><button class="btn primary" data-signin>Entrar con Google</button>'+(FB.err?'<p class="err">'+esc(FB.err)+'</p>':'');
+  else if(FB.state==='denied')body='<p>La cuenta <b>'+esc(FB.user&&FB.user.email)+'</b> no tiene permiso para ver estos datos.</p><p class="muted" style="font-size:13px">Si es tu cuenta, revisa que el correo en las reglas de Firestore sea exactamente este. ('+esc(FB.err)+')</p><button class="btn" data-signout>Usar otra cuenta</button>';
+  return '<div class="wrap" style="padding-block:12vh"><div class="panel" style="max-width:420px;margin:0 auto;padding:28px;gap:14px"><div class="brand">HSTL<small>Ventas y cobranzas</small></div>'+body+'</div></div>';
+}
+
+function renderStatus(){var el=document.getElementById('status');if(!el)return;el.textContent=statusMsg||(FB&&FB.state==='ready'?'Sincronizado':canSave?(LOCAL?'Guardado en este dispositivo':'Todo guardado'):'');el.className='status'+(/sin guardar|Solo lectura|No se pudo/.test(statusMsg)?' warn':'');}
 var toastT;function toast(m){var t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';t.className='toast';t.setAttribute('role','status');document.body.appendChild(t);}t.textContent=m;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(function(){t.hidden=true;},2600);}
 
 /* ---------- chart ---------- */
@@ -382,12 +440,13 @@ function mConfirmDel(m){var s=S.find(function(x){return x.id===m.id;});return '<
 /* ---------- render ---------- */
 function go(){location.hash=ui.view;render();window.scrollTo(0,0);}
 function render(){
+  if(FB&&FB.state!=='ready'&&FB.state!=='fallback'){app.innerHTML=gate();return;}
   CHARTS={};
   var body={resumen:vResumen,mensual:vMensual,anual:vAnual,historico:vHistorico,clientes:vClientes}[ui.view]();
   var tabs=[['resumen','Resumen'],['mensual','Mensual'],['anual','Anual'],['historico','Histórico'],['clientes','Clientes y deudas']];
   app.innerHTML='<header class="top"><div class="wrap"><div class="bar"><div class="brand">HSTL<small>Ventas y cobranzas</small></div><span class="spacer"></span><span class="status" id="status" aria-live="polite"></span><button class="btn" data-backup>Respaldo</button><button class="btn primary" data-new="">+ Nueva venta</button></div>'+
    '<nav class="tabs" aria-label="Secciones">'+tabs.map(function(t){return '<button class="tab" data-go="'+t[0]+'"'+(ui.view===t[0]?' aria-current="page"':'')+'>'+t[1]+'</button>';}).join('')+'</nav></div></header>'+
-   '<main class="wrap">'+(LOCAL&&!localOK?'<div class="banner">Este navegador no permite guardar datos (¿modo incógnito?). Los cambios se perderán al cerrar la página.</div>':(!LOCAL&&canSave===false?'<div class="banner">Esta vista no puede guardar cambios. Ábrela desde tu cuenta para editar.</div>':''))+body+'</main>'+
+   '<main class="wrap">'+(FB&&FB.state==='fallback'?'<div class="banner">'+esc(FB.err)+'</div>':'')+(LOCAL&&!localOK&&!(FB&&FB.state==='ready')?'<div class="banner">Este navegador no permite guardar datos (¿modo incógnito?). Los cambios se perderán al cerrar la página.</div>':(!LOCAL&&canSave===false?'<div class="banner">Esta vista no puede guardar cambios. Ábrela desde tu cuenta para editar.</div>':''))+body+'</main>'+
    (ui.modal?'<div class="scrim" id="scrim">'+({sale:mSale,client:mClient,del:mConfirmDel,backup:mBackup}[ui.modal.t](ui.modal))+'</div>':'');
   renderStatus();wireCharts();
   if(ui.modal&&ui.modal.t==='sale')updCalc();
@@ -422,7 +481,7 @@ function csv(){
 function mBackup(m){
   var imp=m.imp?'<div class="banner" style="display:grid;gap:10px"><span>Se reemplazarán los datos actuales ('+S.length+' ventas) por los del respaldo: <b>'+m.imp.sales.length+' ventas</b>'+(m.imp.saved?', guardado el '+new Date(m.imp.saved).toLocaleString('es-PE'):'')+'.</span><div class="actions"><button class="btn sm" data-impno>Cancelar</button><button class="btn sm primary" id="imp-yes">Reemplazar datos</button></div></div>':'';
   return '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="bt"><div class="head"><h2 id="bt">Respaldo de datos</h2><span class="spacer"></span><button class="btn sm" data-close>Cerrar</button></div>'+
-  (LOCAL?'<p style="margin:0">Tus cambios se guardan <b>solo en este navegador y este equipo</b>. Si borras los datos del navegador o abres la app en otro celular, no los verás. Descarga un respaldo seguido.</p>':'<p style="margin:0">Descarga una copia de tus datos o carga un respaldo anterior.</p>')+
+  (FB&&FB.state==='ready'?'<p style="margin:0">Tus ventas se guardan en tu base de datos de Firebase y se ven igual en todos tus equipos. Sesión: <b>'+esc(FB.user&&FB.user.email)+'</b> · <button class="link" data-signout>Cerrar sesión</button></p>':LOCAL?'<p style="margin:0">Tus cambios se guardan <b>solo en este navegador y este equipo</b>. Si borras los datos del navegador o abres la app en otro celular, no los verás. Descarga un respaldo seguido.</p>':'<p style="margin:0">Descarga una copia de tus datos o carga un respaldo anterior.</p>')+
   '<div style="display:grid;gap:10px">'+
   '<div class="row"><div class="grow"><b>Descargar respaldo</b><div class="muted" style="font-size:13px;white-space:normal">Archivo .json con todas tus ventas. Sirve para pasarlas a otro equipo.</div></div><button class="btn sm" id="bk-json">Descargar</button></div>'+
   '<div class="row"><div class="grow"><b>Cargar respaldo</b><div class="muted" style="font-size:13px;white-space:normal">Acepta el .json de respaldo o un HSTL .html descargado.</div></div><label class="btn sm" for="bk-file" style="display:inline-block">Elegir archivo</label><input type="file" id="bk-file" accept=".json,.html,application/json,text/html" hidden></div>'+
@@ -456,6 +515,8 @@ app.addEventListener('click',function(e){
   if(ds.hflt){ui.hflt=ds.hflt;ui.hlimit=60;render();return;}
   if(t.id==='more'){ui.hlimit+=100;render();return;}
   if(t.id==='csv'){csv();return;}
+  if(ds.signin!=null){signIn();return;}
+  if(ds.signout!=null){signOut();return;}
   if(ds.backup!=null){openModal({t:'backup'});return;}
   if(t.id==='bk-json'){downloadFile('HSTL-respaldo-'+today()+'.json',backupJSON(),'application/json');return;}
   if(t.id==='bk-html'){downloadFile('index.html',buildDoc(),'text/html;charset=utf-8');return;}
@@ -499,6 +560,7 @@ app.addEventListener('change',function(e){
 });
 window.addEventListener('hashchange',function(){var h=location.hash.slice(1);if(VIEWS.indexOf(h)>=0&&h!==ui.view){ui.view=h;ui.modal=null;render();}});
 render();
+if(FB)initFirebase();
 })();
 </script>
 
