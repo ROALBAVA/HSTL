@@ -168,7 +168,8 @@ var app=document.getElementById('app');
 var ui={view:'resumen',month:null,year:null,q:'',onlyDebt:true,sort:'deuda',hq:'',hflt:'todas',hlimit:60,client:null,modal:null};
 var VIEWS=['resumen','mensual','anual','historico','clientes','utilidad','caja','stock'];
 try{var saved=JSON.parse(sessionStorage.getItem('hstl-ui')||'null');if(saved)Object.assign(ui,saved,{modal:null});}catch(e){}
-var h=(location.hash||'').slice(1);if(VIEWS.indexOf(h)>=0)ui.view=h;
+var REP=['mensual','anual','historico'];
+var h=(location.hash||'').slice(1);if(h==='reportes')h=ui.rview||'mensual';if(VIEWS.indexOf(h)>=0)ui.view=h;
 
 /* ---------- helpers ---------- */
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
@@ -614,9 +615,12 @@ function render(){
   if(FB&&FB.state!=='ready'&&FB.state!=='fallback'){app.innerHTML=gate();return;}
   CHARTS={};
   var body={resumen:vResumen,mensual:vMensual,anual:vAnual,historico:vHistorico,clientes:vClientes,stock:vStock,utilidad:vUtil,caja:vCaja}[ui.view]();
-  var tabs=[['resumen','Resumen'],['mensual','Mensual'],['anual','Anual'],['historico','Histórico'],['clientes','Clientes y deudas'],['utilidad','Mi utilidad'],['caja','Caja'],['stock','Stock']];
+  if(REP.indexOf(ui.view)>=0)ui.rview=ui.view;
+  var tabs=[['resumen','Resumen'],['caja','Caja'],['utilidad','Mi utilidad'],['stock','Stock'],['clientes','Clientes y deudas'],['reportes','Reportes']];
+  var curTab=REP.indexOf(ui.view)>=0?'reportes':ui.view;
+  if(REP.indexOf(ui.view)>=0)body='<div class="chips" role="tablist" aria-label="Tipo de reporte">'+[['mensual','Mensual'],['anual','Anual'],['historico','Histórico']].map(function(r){return '<button class="chip" data-go="'+r[0]+'" aria-pressed="'+(ui.view===r[0])+'">'+r[1]+'</button>';}).join('')+'</div>'+body;
   app.innerHTML='<header class="top"><div class="wrap"><div class="bar"><div class="brand">HSTL<small>Ventas y cobranzas</small></div><span class="spacer"></span><span class="status" id="status" aria-live="polite"></span><button class="btn" data-backup>Respaldo</button><button class="btn primary newsale" data-new="">+ Nueva venta</button></div>'+
-   '<nav class="tabs" aria-label="Secciones">'+tabs.map(function(t){return '<button class="tab" data-go="'+t[0]+'"'+(ui.view===t[0]?' aria-current="page"':'')+'>'+t[1]+'</button>';}).join('')+'</nav></div></header>'+
+   '<nav class="tabs" aria-label="Secciones">'+tabs.map(function(t){return '<button class="tab" data-go="'+t[0]+'"'+(curTab===t[0]?' aria-current="page"':'')+'>'+t[1]+'</button>';}).join('')+'</nav></div></header>'+
    '<button class="fab" data-new="" aria-label="Nueva venta">+</button><main class="wrap">'+(FB&&FB.state==='fallback'?'<div class="banner">'+esc(FB.err)+'</div>':'')+(LOCAL&&!localOK&&!(FB&&FB.state==='ready')?'<div class="banner">Este navegador no permite guardar datos (¿modo incógnito?). Los cambios se perderán al cerrar la página.</div>':(!LOCAL&&canSave===false?'<div class="banner">Esta vista no puede guardar cambios. Ábrela desde tu cuenta para editar.</div>':''))+body+'</main>'+
    (ui.modal?'<div class="scrim" id="scrim">'+({sale:mSale,client:mClient,del:mConfirmDel,backup:mBackup,lot:mLot,lotdel:mLotDel,cajaset:mCajaSet,mov:mMov,debt:mDebt,cuadre:mCuadre}[ui.modal.t](ui.modal))+'</div>':'');
   renderStatus();wireCharts();
@@ -675,7 +679,7 @@ app.addEventListener('click',function(e){
   var t=e.target.closest('button,tr.click,[data-close]');if(!t)return;
   var ds=t.dataset;
   if(t.id==='scrim')return;
-  if(ds.go){ui.view=ds.go;ui.modal=null;go();return;}
+  if(ds.go){ui.view=ds.go==='reportes'?(ui.rview||'mensual'):ds.go;ui.modal=null;go();return;}
   if(ds.new!=null){openModal({t:'sale',per:ds.new||null});return;}
   if(ds.newClient!=null){openModal({t:'sale',client:ds.newClient,back:{t:'client',k:key(ds.newClient)}});return;}
   if(ds.client!=null){e.stopPropagation();openModal({t:'client',k:ds.client});return;}
@@ -775,7 +779,7 @@ app.addEventListener('change',function(e){
   if(e.target.id==='bk-file'&&e.target.files&&e.target.files[0])readBackupFile(e.target.files[0]);
 });
 var lastNarrow=window.innerWidth<600;window.addEventListener('resize',function(){var n=window.innerWidth<600;if(n!==lastNarrow){lastNarrow=n;if(!ui.modal)render();}});
-window.addEventListener('hashchange',function(){var h=location.hash.slice(1);if(VIEWS.indexOf(h)>=0&&h!==ui.view){ui.view=h;ui.modal=null;render();}});
+window.addEventListener('hashchange',function(){var h=location.hash.slice(1);if(h==='reportes')h=ui.rview||'mensual';if(VIEWS.indexOf(h)>=0&&h!==ui.view){ui.view=h;ui.modal=null;render();}});
 if(!FB){var mc0=migrate();if(mc0)setTimeout(function(){changed(mc0>0?mc0+' ventas pagadas marcadas como transferidas':'');},0);}
 render();
 if(FB)initFirebase();
