@@ -622,7 +622,7 @@ function render(){
   app.innerHTML='<header class="top"><div class="wrap"><div class="bar"><div class="brand">HSTL<small>Ventas y cobranzas</small></div><span class="spacer"></span><span class="status" id="status" aria-live="polite"></span><button class="btn" data-backup>Respaldo</button><button class="btn primary newsale" data-new="">+ Nueva venta</button></div>'+
    '<nav class="tabs" aria-label="Secciones">'+tabs.map(function(t){return '<button class="tab" data-go="'+t[0]+'"'+(curTab===t[0]?' aria-current="page"':'')+'>'+t[1]+'</button>';}).join('')+'</nav></div></header>'+
    '<button class="fab" data-new="" aria-label="Nueva venta">+</button><main class="wrap">'+(FB&&FB.state==='fallback'?'<div class="banner">'+esc(FB.err)+'</div>':'')+(LOCAL&&!localOK&&!(FB&&FB.state==='ready')?'<div class="banner">Este navegador no permite guardar datos (¿modo incógnito?). Los cambios se perderán al cerrar la página.</div>':(!LOCAL&&canSave===false?'<div class="banner">Esta vista no puede guardar cambios. Ábrela desde tu cuenta para editar.</div>':''))+body+'</main>'+
-   (ui.modal?'<div class="scrim" id="scrim">'+({sale:mSale,client:mClient,del:mConfirmDel,backup:mBackup,lot:mLot,lotdel:mLotDel,cajaset:mCajaSet,mov:mMov,debt:mDebt,cuadre:mCuadre}[ui.modal.t](ui.modal))+'</div>':'');
+   (ui.modal?'<div class="scrim" id="scrim">'+({sale:mSale,client:mClient,del:mConfirmDel,backup:mBackup,payconf:mPayConf,lot:mLot,lotdel:mLotDel,cajaset:mCajaSet,mov:mMov,debt:mDebt,cuadre:mCuadre}[ui.modal.t](ui.modal))+'</div>':'');
   renderStatus();wireCharts();
   var nav=app.querySelector('nav.tabs'),cur=nav&&nav.querySelector('[aria-current]');if(cur&&nav.scrollWidth>nav.clientWidth)nav.scrollLeft=Math.max(0,cur.offsetLeft-(nav.clientWidth-cur.offsetWidth)/2);
   if(ui.modal&&ui.modal.t==='sale')updCalc();
@@ -643,9 +643,50 @@ function submitSale(){
   if(d.t)rec.t=d.t;
   if(d.d&&a>0)rec.a=r2(a);if(String(d.n||'').trim())rec.n=String(d.n).trim();
   if(rec.d&&rec.a>=rec.v){rec.d=0;delete rec.a;}
-  if(ui.modal.id){var i=S.findIndex(function(x){return x.id===ui.modal.id;});rec.id=S[i].id;if(S[i].pl)rec.pl=S[i].pl;var ob=bal(S[i]),nb=bal(rec);if(nb<ob)recPay(rec,ob-nb);S[i]=rec;ui.modal=ui.modal.back||null;render();changed('Venta actualizada');}
-  else{DB.seq=(DB.seq||S.length)+1;rec.id='s'+DB.seq;S.push(rec);ui.modal=ui.modal.back||null;render();changed('Venta agregada');}
+  var form=ui.modal,editId=form.id,after=form.back||null,payAmt=0,prev=0,old=null;
+  if(editId){old=S.find(function(x){return x.id===editId;});var paidOld=r2(old.v-bal(old)),paidNew=r2(rec.v-bal(rec));payAmt=r2(paidNew-paidOld);prev=paidOld;}
+  else payAmt=r2(rec.v-bal(rec));
+  function commit(){
+    if(editId){var i=S.findIndex(function(x){return x.id===editId;});rec.id=S[i].id;if(S[i].pl)rec.pl=S[i].pl;var ob=bal(S[i]),nb=bal(rec);if(nb<ob)recPay(rec,ob-nb);S[i]=rec;ui.modal=after;render();changed('Venta actualizada');}
+    else{DB.seq=(DB.seq||S.length)+1;rec.id='s'+DB.seq;S.push(rec);ui.modal=after;render();changed('Venta agregada');}
+  }
+  if(payAmt>0.004){askPay([splitPay(rec,payAmt,prev)],commit,form,{title:editId?'Confirmar pago':'Confirmar venta pagada'});return;}
+  commit();
 }
+/* ---------- confirmación de pago: ganancia vs empresa ---------- */
+function splitPay(s,amt,prevPaid){
+  var cost=r2(s.q*s.u),prev=Math.max(0,prevPaid||0);
+  var compLeft=Math.max(0,r2(cost-Math.min(prev,cost)));
+  var toComp=r2(Math.min(amt,compLeft)),toGain=r2(amt-toComp);
+  var l=lotAt(s.f||s.p+'-01'),marg=null;
+  if(l&&s.u>0){marg=r2(toComp*(s.u-l.x)/s.u);}
+  return{s:s,amt:r2(amt),comp:toComp,gain:toGain,marg:marg};
+}
+function prevPaidOf(s){return s.d?(s.a||0):0;}
+function planPayment(k,amt){
+  var pend=S.filter(function(s){return key(s.c)===k&&bal(s)>0;}).sort(function(a,b){return (a.f||a.p)<(b.f||b.p)?-1:1;});
+  var left=r2(amt),lines=[];pend.forEach(function(s){if(left<=0)return;var b=bal(s),use=Math.min(left,b);lines.push(splitPay(s,use,prevPaidOf(s)));left=r2(left-use);});
+  return{lines:lines,left:left};
+}
+function askPay(lines,ok,back,opts){opts=opts||{};ui.modal={t:'payconf',lines:lines,ok:ok,back:back||null,left:opts.left||0,title:opts.title||'Confirmar pago'};render();setTimeout(function(){var b=document.getElementById('pc-ok');if(b)b.focus();},0);}
+function mPayConf(m){
+  var L=m.lines,tot=sum(L,function(x){return x.amt;}),comp=sum(L,function(x){return x.comp;}),gain=sum(L,function(x){return x.gain;});
+  var hasM=L.some(function(x){return x.marg!==null;}),marg=sum(L,function(x){return x.marg||0;});
+  var names={};L.forEach(function(x){names[x.s.c]=1;});
+  var who=Object.keys(names).join(', ');
+  var rows=L.length>1?'<div class="tablewrap"><table><thead><tr><th>Venta</th><th class="n">Paga</th><th class="n">Ganancia</th><th class="n">Empresa</th></tr></thead><tbody>'+L.map(function(x){return '<tr><td>'+fdate(x.s.f)+' · '+num(x.s.q)+' uds</td><td class="n">'+money(x.amt,2)+'</td><td class="n">'+money(x.gain,2)+'</td><td class="n">'+money(x.comp,2)+'</td></tr>';}).join('')+'</tbody></table></div>':'';
+  return '<div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="pct"><h2 id="pct">'+esc(m.title)+'</h2>'+
+  '<p style="margin:0">'+esc(who)+' paga <b>'+money(tot,2)+'</b>. Se reparte así:</p>'+
+  '<div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr))">'+
+   '<div class="kpi" style="background:var(--good-soft);border-color:transparent"><span class="label">Tu ganancia</span><span class="val" style="color:var(--good)">'+money(gain,2)+'</span><span class="sub">va a tu cuenta personal</span></div>'+
+   '<div class="kpi" style="background:var(--accent-soft);border-color:transparent"><span class="label">Para la empresa</span><span class="val" style="color:var(--accent)">'+money(comp,2)+'</span><span class="sub">lo que te cobras por unidad</span></div></div>'+
+  (hasM&&comp>0?'<p class="muted" style="margin:0;font-size:13px">De lo de la empresa: '+money(r2(comp-marg),2)+' repone el stock (X) y '+money(marg,2)+' es margen de la empresa (Y − X).</p>':'')+
+  rows+
+  (comp>0&&gain===0&&L.some(function(x){return r2(x.s.q*x.s.u)>x.comp+prevPaidOf(x.s)+0.004;})?'<p class="muted" style="margin:0;font-size:13px">En pagos parciales primero se cubre la parte de la empresa; tu ganancia sale de lo que se pague después.</p>':'')+
+  (m.left>0?'<p class="banner" style="margin:0">Sobran '+money(m.left,2)+': el monto es mayor que lo que debe.</p>':'')+
+  '<div class="actions"><button class="btn" data-pcno>Cancelar</button><button class="btn primary" id="pc-ok">Aceptar</button></div></div>';
+}
+
 function applyPayment(k,amt){
   var pend=S.filter(function(s){return key(s.c)===k&&bal(s)>0;}).sort(function(a,b){return (a.f||a.p)<(b.f||b.p)?-1:1;});
   var left=r2(amt);pend.forEach(function(s){if(left<=0)return;var b=bal(s);if(left>=b){left=r2(left-b);recPay(s,b);s.d=0;delete s.a;}else{recPay(s,left);s.a=r2((s.a||0)+left);left=0;}});
@@ -730,15 +771,18 @@ app.addEventListener('click',function(e){
   if(ds.paycancel!=null){ui.modal.pay=false;render();return;}
   if(ds.renopen!=null){ui.modal.ren=true;ui.modal.pay=false;render();var ri=document.getElementById('r_name');if(ri)ri.select();return;}
   if(ds.rencancel!=null){ui.modal.ren=false;render();return;}
-  if(ds.payall!=null){ui.modal.payAll=true;ui.modal.pay=false;render();return;}
+  if(ds.payall!=null){var cm2=ui.modal,k2=cm2.k;cm2.pay=false;var lines2=S.filter(function(s){return key(s.c)===k2&&bal(s)>0;}).map(function(s){return splitPay(s,bal(s),prevPaidOf(s));});
+    askPay(lines2,function(){S.forEach(function(s){if(key(s.c)===k2&&bal(s)>0){recPay(s,bal(s));s.d=0;delete s.a;}});ui.modal=cm2;render();changed('Deuda saldada');},cm2,{title:'Confirmar pago total'});return;}
   if(ds.payallno!=null){ui.modal.payAll=false;render();return;}
   if(t.id==='payall-yes'){var k=ui.modal.k;S.forEach(function(s){if(key(s.c)===k&&bal(s)>0){recPay(s,bal(s));s.d=0;delete s.a;}});ui.modal.payAll=false;render();changed('Deuda saldada');return;}
-  if(ds.paid){var s=S.find(function(x){return x.id===ds.paid;});if(s){recPay(s,bal(s));s.d=0;delete s.a;render();changed('Marcada como pagada');}return;}
+  if(ds.paid){var s=S.find(function(x){return x.id===ds.paid;});if(s){var cm3=ui.modal;askPay([splitPay(s,bal(s),prevPaidOf(s))],function(){recPay(s,bal(s));s.d=0;delete s.a;ui.modal=cm3;render();changed('Marcada como pagada');},cm3);}return;}
+  if(ds.pcno!=null){ui.modal=ui.modal.back||null;render();return;}
+  if(t.id==='pc-ok'){var fn=ui.modal.ok;if(fn)fn();return;}
 });
 app.addEventListener('mousedown',function(e){if(e.target.id==='scrim'){ui.__scrimDown=true;}});
-app.addEventListener('mouseup',function(e){if(e.target.id==='scrim'&&ui.__scrimDown){ui.__scrimDown=false;if(ui.modal&&ui.modal.t==='sale'&&ui.modal.back){ui.modal=ui.modal.back;render();}else closeModal();}ui.__scrimDown=false;});
+app.addEventListener('mouseup',function(e){if(e.target.id==='scrim'&&ui.__scrimDown){ui.__scrimDown=false;if(ui.modal&&ui.modal.t==='payconf'){ui.modal=ui.modal.back||null;render();}else if(ui.modal&&ui.modal.t==='sale'&&ui.modal.back){ui.modal=ui.modal.back;render();}else closeModal();}ui.__scrimDown=false;});
 document.addEventListener('keydown',function(e){
-  if(e.key==='Escape'&&ui.modal){if(ui.modal.t==='sale'&&ui.modal.back){ui.modal=ui.modal.back;render();}else closeModal();}
+  if(e.key==='Escape'&&ui.modal){if(ui.modal.t==='payconf'){ui.modal=ui.modal.back||null;render();}else if(ui.modal.t==='sale'&&ui.modal.back){ui.modal=ui.modal.back;render();}else closeModal();}
   if(e.key==='Enter'&&e.target.matches&&e.target.matches('tr.click')){e.target.click();}
 });
 app.addEventListener('submit',function(e){
@@ -754,7 +798,8 @@ app.addEventListener('submit',function(e){
   if(e.target.id==='cqf'){var real=gv('cq_m');if(real==='')return;var ci2=cajaInfo(),diff=r2(+real-ci2.total);if(Math.abs(diff)>=0.005)MOV().push({id:newId('m'),f:today(),k:diff>0?'in':'out',m:Math.abs(diff),n:'Ajuste de caja (cuadre)'});ui.modal=null;render();changed(Math.abs(diff)<0.005?'La caja ya estaba cuadrada':'Ajuste de '+money(diff,2)+' registrado');}
   if(e.target.id==='trf'){var tf=gv('t_f')||today();ui.trDate=tf;var ids=Object.keys(ui.sel||{});var m=0,n=0;S.forEach(function(s){if(ui.sel[s.id]&&!s.t){s.t=tf;m+=gain(s);n++;}});ui.sel={};render();if(n)changed('Transferencia de '+money(m,2)+' registrada ('+n+' ventas)');}
   if(e.target.id==='bulkf'){var to=gv('b_to');if(!to)return;var n2=0;S.forEach(function(s){if(!s.t&&(s.f||s.p+'-01')<=to){s.t=to;n2++;}});ui.bulk=false;ui.bulkTo=to;render();changed(n2+' ventas marcadas como transferidas');}
-  if(e.target.id==='payf'){var amt=+gv('p_amt');if(!(amt>0))return;var k=ui.modal.k;var left=applyPayment(k,amt);ui.modal.pay=false;render();changed(left>0?'Pago aplicado. Sobran '+money(left,2):'Pago de '+money(amt,2)+' aplicado');}
+  if(e.target.id==='payf'){var amt=+gv('p_amt');if(!(amt>0))return;var k=ui.modal.k,cm=ui.modal;cm.payAmt=gv('p_amt');var plan=planPayment(k,amt);
+    askPay(plan.lines,function(){var left=applyPayment(k,amt);cm.pay=false;cm.payAmt='';ui.modal=cm;render();changed(left>0?'Pago aplicado. Sobran '+money(left,2):'Pago de '+money(amt,2)+' aplicado');},cm,{left:plan.left});}
   if(e.target.id==='renf'){var nn=gv('r_name').trim().replace(/\s+/g,' ');if(!nn)return;var ok=ui.modal.k;var ex=clients().find(function(c){return c.k===key(nn)&&c.k!==ok;});var target=ex?ex.name:nn;
     S.forEach(function(s){if(key(s.c)===ok)s.c=target;});ui.modal={t:'client',k:key(target)};render();changed(ex?'Clientes unidos':'Nombre actualizado');}
 });
